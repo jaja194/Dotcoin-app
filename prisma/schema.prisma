@@ -1,0 +1,200 @@
+// ==========================================
+// PRISMA DATABASE SCHEMA - DOTCOIN PLATFORM
+// ==========================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------
+// 1. USER & SECURITY MODEL
+// ------------------------------------------
+enum Role {
+  USER
+  SUPER_ADMIN
+  SUPPORT_ADMIN
+}
+
+model User {
+  id                    String            @id @default(uuid())
+  email                 String            @unique
+  name                  String?
+  password              String
+  role                  Role              @default(USER)
+  isEmailVerified       Boolean           @default(false)
+  is2FAEnabled          Boolean           @default(false)
+  twoFASecret           String?
+  isFrozen              Boolean           @default(false) // Emergency freeze capability
+  preferredCurrency     String            @default("USD") // USD, EUR, BTC, etc.
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  // Relationships
+  botSubscriptions      BotSubscription[]
+  investmentPlans       InvestmentPlan[]
+  transactions          Transaction[]
+  adminAuditLogs        AdminAuditLog[]   @relation("AdminActor")
+  targetAuditLogs       AdminAuditLog[]   @relation("TargetUser")
+}
+
+// ------------------------------------------
+// 2. BOT TIERS & USER PURCHASES
+// ------------------------------------------
+enum BotTier {
+  APEX_TRADER      // $5,000 | 67% Target ROI
+  QUANTUM_ALPHA    // $10,000 | 100% Target ROI
+  TITAN_NEXUS      // $20,000 | 200% Target ROI
+}
+
+enum SubscriptionStatus {
+  PENDING_PAYMENT
+  PARTIAL_PAYMENT
+  ACTIVE
+  PAUSED           // Triggered on missed recurring plan payment
+  EXPIRED
+}
+
+model BotSubscription {
+  id                    String             @id @default(uuid())
+  userId                String
+  tier                  BotTier
+  accessFeeUsdt         Float              // Required fee: 5000, 10000, or 20000
+  amountPaidUsdt        Float              @default(0.0)
+  status                SubscriptionStatus @default(PENDING_PAYMENT)
+  unlockedAt            DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  // Relationships
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  investmentPlans       InvestmentPlan[]
+}
+
+// ------------------------------------------
+// 3. INVESTMENT PLANS & 365-DAY CAPITAL LOCK
+// ------------------------------------------
+enum PlanCycle {
+  WEEKLY    // $500 - $4,000
+  MONTHLY   // $5,000 - $100,000
+  YEARLY    // $200,000 - $1,000,000
+}
+
+enum PlanStatus {
+  PENDING
+  ACTIVE
+  PAUSED_OVERDUE
+  COMPLETED
+}
+
+model InvestmentPlan {
+  id                    String          @id @default(uuid())
+  userId                String
+  botSubscriptionId     String
+  cycle                 PlanCycle
+  capitalAmountUsdt     Float           // Capital deposited
+  accruedProfitUsdt     Float           @default(0.0) // Daily 00:00 UTC ROI accruals
+  status                PlanStatus      @default(PENDING)
+  
+  // 365-Day Capital Lockup Enforcement
+  lockupStartDate       DateTime?
+  lockupEndDate         DateTime?       // Set to exactly +365 days upon activation
+  isLocked              Boolean         @default(true)
+
+  nextPaymentDueDate    DateTime?       // Due date for recurring plan deposits
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  // Relationships
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  botSubscription       BotSubscription @relation(fields: [botSubscriptionId], references: [id], onDelete: Cascade)
+  transactions          Transaction[]
+}
+
+// ------------------------------------------
+// 4. TRANSACTIONS & MULTI-CHAIN LEDGER
+// ------------------------------------------
+enum TransactionType {
+  BOT_ACCESS_FEE
+  BOT_UPGRADE_FEE
+  INVESTMENT_DEPOSIT
+  RECURRING_PLAN_PAYMENT
+  PROFIT_PAYOUT
+  WITHDRAWAL
+}
+
+enum NetworkProtocol {
+  TRC20
+  ERC20
+  BEP20
+}
+
+enum TransactionStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+  FAILED
+  REJECTED
+}
+
+model Transaction {
+  id                    String            @id @default(uuid())
+  userId                String
+  investmentPlanId      String?
+  type                  TransactionType
+  protocol              NetworkProtocol
+  expectedAmountUsdt    Float
+  receivedAmountUsdt    Float             @default(0.0)
+  depositAddress        String            // Admin provided address captured at checkout
+  txHash                String?           @unique // On-chain blockchain transaction hash
+  confirmations         Int               @default(0)
+  status                TransactionStatus @default(PENDING)
+  notes                 String?           // For manual overrides / audit notes
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  // Relationships
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  investmentPlan        InvestmentPlan?   @relation(fields: [investmentPlanId], references: [id], onDelete: SetNull)
+}
+
+// ------------------------------------------
+// 5. ADMIN USDT WALLET CONFIGURATOR
+// ------------------------------------------
+enum WalletPurpose {
+  BOT_ACCESS_FEE
+  INVESTMENT_CAPITAL
+}
+
+model SystemWallet {
+  id                    String          @id @default(uuid())
+  purpose               WalletPurpose
+  protocol              NetworkProtocol
+  address               String          // Pasted USDT wallet address
+  isActive              Boolean         @default(true)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  @@unique([purpose, protocol])
+}
+
+// ------------------------------------------
+// 6. IMMUTABLE ADMIN AUDIT LOGS
+// ------------------------------------------
+model AdminAuditLog {
+  id                    String          @id @default(uuid())
+  adminId               String
+  targetUserId          String?
+  actionType            String          // e.g., "MANUAL_DEPOSIT_OVERRIDE", "WALLET_ADDRESS_UPDATE"
+  changesMade           String          // JSON string detailing before and after values
+  ipAddress             String?
+  createdAt             DateTime        @default(now())
+
+  // Relationships
+  admin                 User            @relation("AdminActor", fields: [adminId], references: [id], onDelete: Cascade)
+  targetUser            User?           @relation("TargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+}
