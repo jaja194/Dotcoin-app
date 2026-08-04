@@ -4,7 +4,7 @@
 // ADMIN CONTROL PANEL & VERIFICATION (/admin)
 // ==========================================
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { 
   ShieldAlert, 
@@ -12,75 +12,187 @@ import {
   XCircle, 
   ExternalLink, 
   Wallet, 
-  Users, 
-  TrendingUp, 
   Bot,
   RefreshCw,
-  Search
+  Search,
+  AlertCircle
 } from 'lucide-react';
 
-interface DepositRecord {
+interface PendingTransaction {
   id: string;
-  userEmail: string;
-  amount: number;
-  network: 'TRC20' | 'ERC20' | 'BEP20';
-  txHash: string;
-  purpose: string;
-  tier: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  userId: string;
+  type: 'BOT_ACCESS_FEE' | 'INVESTMENT_DEPOSIT' | 'WITHDRAWAL' | 'PROFIT_PAYOUT';
+  protocol: 'TRC20' | 'ERC20' | 'BEP20';
+  expectedAmountUsdt: number;
+  receivedAmountUsdt?: number;
+  txHash: string | null;
+  status: 'PENDING' | 'COMPLETED' | 'REJECTED';
   createdAt: string;
+  investmentPlanId?: string | null;
+  user?: {
+    email: string;
+  };
 }
 
-const INITIAL_DEPOSITS: DepositRecord[] = [
-  {
-    id: 'dep_101',
-    userEmail: 'alex.trader@gmail.com',
-    amount: 5000.00,
-    network: 'TRC20',
-    txHash: '0x8f7c9123a4b56c7890d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a3',
-    purpose: 'Apex Trader Unlock',
-    tier: 'APEX_TRADER',
-    status: 'PENDING',
-    createdAt: '2026-07-27 14:30',
-  },
-  {
-    id: 'dep_102',
-    userEmail: 'sara.invest@yahoo.com',
-    amount: 10000.00,
-    network: 'BEP20',
-    txHash: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2',
-    purpose: 'Quantum Alpha Unlock',
-    tier: 'QUANTUM_ALPHA',
-    status: 'PENDING',
-    createdAt: '2026-07-27 15:10',
-  },
-];
-
 export default function AdminDashboardPage() {
-  const [deposits, setDeposits] = useState<DepositRecord[]>(INITIAL_DEPOSITS);
+  const [deposits, setDeposits] = useState<PendingTransaction[]>([]);
+  const [loadingDeposits, setLoadingDeposits] = useState<boolean>(true);
+  const [processingId, setProcessingId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [trc20Wallet, setTrc20Wallet] = useState('TDotCoinUsdtAddressTrc20NetworkKey123456789');
-  const [erc20Wallet, setErc20Wallet] = useState('0xDotCoinUsdtAddressErc20NetworkKey123456789');
-  const [bep20Wallet, setBep20Wallet] = useState('0xDotCoinUsdtAddressBep20NetworkKey123456789');
+  
+  // Real System Stats State
+  const [stats, setStats] = useState({
+    pendingVerifications: 0,
+    totalCapitalLocked: 0,
+    activeBotLicenses: 0,
+  });
+
+  // Admin Wallets State
+  const [trc20Wallet, setTrc20Wallet] = useState('');
+  const [erc20Wallet, setErc20Wallet] = useState('');
+  const [bep20Wallet, setBep20Wallet] = useState('');
+  const [savingWallets, setSavingWallets] = useState(false);
   const [walletSaved, setWalletSaved] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const handleAction = (id: string, action: 'APPROVED' | 'REJECTED') => {
-    setDeposits((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status: action } : item))
-    );
+  useEffect(() => {
+    fetchInitialData();
+  }, []);
+
+  const fetchInitialData = async () => {
+    setLoadingDeposits(true);
+    const token = localStorage.getItem('token');
+    const authHeader = { Authorization: `Bearer ${token}` };
+
+    try {
+      // 1. Fetch Pending Transactions
+      const resDeposits = await fetch('/api/transactions?status=PENDING', { headers: authHeader });
+      const dataDeposits = await resDeposits.json();
+      
+      if (dataDeposits.success) {
+        const pendingList: PendingTransaction[] = dataDeposits.data.transactions || [];
+        setDeposits(pendingList);
+        setStats((prev) => ({ ...prev, pendingVerifications: pendingList.length }));
+      }
+
+      // 2. Fetch Dashboard Overview Stats
+      const resDashboard = await fetch('/api/dashboard', { headers: authHeader });
+      const dataDashboard = await resDashboard.json();
+      if (dataDashboard.success) {
+        setStats((prev) => ({
+          ...prev,
+          totalCapitalLocked: dataDashboard.data.activePlan?.capitalAmountUsdt || 0,
+          activeBotLicenses: dataDashboard.data.user?.botAccessTier !== 'NONE' ? 1 : 0,
+        }));
+      }
+
+      // 3. Fetch Configured System Wallets
+      const resWallets = await fetch('/api/admin/wallets', { headers: authHeader });
+      const dataWallets = await resWallets.json();
+      if (dataWallets.success && Array.isArray(dataWallets.data)) {
+        dataWallets.data.forEach((w: { protocol: string; address: string }) => {
+          if (w.protocol === 'TRC20') setTrc20Wallet(w.address);
+          if (w.protocol === 'ERC20') setErc20Wallet(w.address);
+          if (w.protocol === 'BEP20') setBep20Wallet(w.address);
+        });
+      }
+    } catch (err) {
+      console.error('Error loading admin panel data:', err);
+      setFeedback({ type: 'error', message: 'Failed to load initial admin data.' });
+    } finally {
+      setLoadingDeposits(false);
+    }
   };
 
-  const handleSaveWallets = (e: React.FormEvent) => {
+  // Handle Approve or Reject using POST /api/admin/deposit
+  const handleAction = async (transactionId: string, targetStatus: 'COMPLETED' | 'REJECTED') => {
+    setProcessingId(transactionId);
+    setFeedback(null);
+    try {
+      const token = localStorage.getItem('token');
+      const targetTx = deposits.find((d) => d.id === transactionId);
+
+      const res = await fetch('/api/admin/deposit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          transactionId,
+          status: targetStatus,
+          receivedAmountUsdt: targetTx?.expectedAmountUsdt || 0,
+          notes: `Admin processed as ${targetStatus}`,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setDeposits((prev) => prev.filter((item) => item.id !== transactionId));
+        setStats((prev) => ({
+          ...prev,
+          pendingVerifications: Math.max(0, prev.pendingVerifications - 1),
+        }));
+        setFeedback({
+          type: 'success',
+          message: `Transaction ${targetStatus === 'COMPLETED' ? 'approved' : 'rejected'} successfully!`,
+        });
+      } else {
+        setFeedback({ type: 'error', message: data.error || 'Verification action failed.' });
+      }
+    } catch (err) {
+      setFeedback({ type: 'error', message: 'Network error processing deposit.' });
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  // Save System Receiving Wallets using POST /api/admin/wallets
+  const handleSaveWallets = async (e: React.FormEvent) => {
     e.preventDefault();
-    setWalletSaved(true);
-    setTimeout(() => setWalletSaved(false), 3000);
+    setSavingWallets(true);
+    setFeedback(null);
+    const token = localStorage.getItem('token');
+    const authHeader = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    try {
+      const walletRequests = [
+        { purpose: 'BOT_ACCESS_FEE', protocol: 'TRC20', address: trc20Wallet },
+        { purpose: 'BOT_ACCESS_FEE', protocol: 'ERC20', address: erc20Wallet },
+        { purpose: 'BOT_ACCESS_FEE', protocol: 'BEP20', address: bep20Wallet },
+      ];
+
+      await Promise.all(
+        walletRequests.map((wallet) =>
+          fetch('/api/admin/wallets', {
+            method: 'POST',
+            headers: authHeader,
+            body: JSON.stringify(wallet),
+          })
+        )
+      );
+
+      setWalletSaved(true);
+      setTimeout(() => setWalletSaved(false), 3000);
+    } catch (err) {
+      setFeedback({ type: 'error', message: 'Failed to update receiving wallets.' });
+    } finally {
+      setSavingWallets(false);
+    }
   };
 
-  const filteredDeposits = deposits.filter(
-    (d) =>
-      d.userEmail.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      d.txHash.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredDeposits = deposits.filter((d) => {
+    const userEmail = d.user?.email || d.userId || '';
+    const hash = d.txHash || '';
+    return (
+      userEmail.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      hash.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  });
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 pb-20">
@@ -121,6 +233,20 @@ export default function AdminDashboardPage() {
           </div>
         </div>
 
+        {/* Global Feedback Banner */}
+        {feedback && (
+          <div
+            className={`p-4 rounded-xl text-xs font-semibold flex items-center gap-2 ${
+              feedback.type === 'success'
+                ? 'bg-emerald-950/80 border border-emerald-700 text-emerald-300'
+                : 'bg-red-950/80 border border-red-700 text-red-300'
+            }`}
+          >
+            {feedback.type === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+            <span>{feedback.message}</span>
+          </div>
+        )}
+
         {/* System Overview Stats */}
         <section className="grid grid-cols-1 sm:grid-cols-3 gap-6">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-lg">
@@ -129,7 +255,7 @@ export default function AdminDashboardPage() {
               <RefreshCw className="w-4 h-4 text-amber-400" />
             </div>
             <div className="text-3xl font-black text-amber-400 mt-3">
-              {deposits.filter((d) => d.status === 'PENDING').length}
+              {stats.pendingVerifications}
             </div>
           </div>
 
@@ -138,7 +264,9 @@ export default function AdminDashboardPage() {
               <span>Total Capital Locked</span>
               <Wallet className="w-4 h-4 text-cyan-400" />
             </div>
-            <div className="text-3xl font-black text-slate-100 mt-3">$2,450,000 USDT</div>
+            <div className="text-3xl font-black text-slate-100 mt-3">
+              ${stats.totalCapitalLocked.toLocaleString()} USDT
+            </div>
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-lg">
@@ -146,7 +274,9 @@ export default function AdminDashboardPage() {
               <span>Active Bot Licenses</span>
               <Bot className="w-4 h-4 text-emerald-400" />
             </div>
-            <div className="text-3xl font-black text-emerald-400 mt-3">184</div>
+            <div className="text-3xl font-black text-emerald-400 mt-3">
+              {stats.activeBotLicenses}
+            </div>
           </div>
         </section>
 
@@ -156,15 +286,24 @@ export default function AdminDashboardPage() {
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <h2 className="text-lg font-bold">Pending Blockchain Deposit Verifications</h2>
-            <div className="relative w-full sm:w-72">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search email or TXID..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-500"
-              />
+            <div className="flex items-center gap-3 w-full sm:w-auto">
+              <button
+                onClick={fetchInitialData}
+                className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-slate-300 transition-all"
+                title="Refresh deposits"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Search email or TXID..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
             </div>
           </div>
 
@@ -172,17 +311,23 @@ export default function AdminDashboardPage() {
             <table className="w-full text-left text-xs border-collapse">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
-                  <th className="py-3 px-4">User Email</th>
+                  <th className="py-3 px-4">User</th>
                   <th className="py-3 px-4">Amount</th>
                   <th className="py-3 px-4">Network</th>
-                  <th className="py-3 px-4">Purpose / Tier</th>
+                  <th className="py-3 px-4">Purpose / Type</th>
                   <th className="py-3 px-4">Blockchain TXID</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-medium">
-                {filteredDeposits.length === 0 ? (
+                {loadingDeposits ? (
+                  <tr>
+                    <td colSpan={7} className="py-8 text-center text-slate-400">
+                      Loading pending deposits...
+                    </td>
+                  </tr>
+                ) : filteredDeposits.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-8 text-center text-slate-500">
                       No deposit records matching criteria.
@@ -191,61 +336,57 @@ export default function AdminDashboardPage() {
                 ) : (
                   filteredDeposits.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-800/30 transition-colors">
-                      <td className="py-4 px-4 font-bold text-slate-100">{item.userEmail}</td>
+                      <td className="py-4 px-4 font-bold text-slate-100">
+                        {item.user?.email || `${item.userId.substring(0, 10)}...`}
+                      </td>
                       <td className="py-4 px-4 font-bold text-cyan-400">
-                        ${item.amount.toLocaleString()} USDT
+                        ${item.expectedAmountUsdt.toLocaleString()} USDT
                       </td>
-                      <td className="py-4 px-4 font-semibold text-slate-300">{item.network}</td>
-                      <td className="py-4 px-4 text-slate-400">{item.purpose}</td>
+                      <td className="py-4 px-4 font-semibold text-slate-300">{item.protocol}</td>
+                      <td className="py-4 px-4 text-slate-400">{item.type}</td>
                       <td className="py-4 px-4">
-                        <a
-                          href={`https://tronscan.org/#/transaction/${item.txHash}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-mono text-[11px] text-slate-400 hover:text-cyan-400 flex items-center gap-1 max-w-[140px] truncate"
-                        >
-                          <span>{item.txHash}</span>
-                          <ExternalLink className="w-3 h-3 flex-shrink-0" />
-                        </a>
+                        {item.txHash ? (
+                          <a
+                            href={
+                              item.protocol === 'TRC20'
+                                ? `https://tronscan.org/#/transaction/${item.txHash}`
+                                : `https://bscscan.com/tx/${item.txHash}`
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-[11px] text-slate-400 hover:text-cyan-400 flex items-center gap-1 max-w-[140px] truncate"
+                          >
+                            <span>{item.txHash}</span>
+                            <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                          </a>
+                        ) : (
+                          <span className="text-slate-500 font-mono text-[11px]">No TxHash</span>
+                        )}
                       </td>
                       <td className="py-4 px-4">
-                        {item.status === 'PENDING' && (
-                          <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            PENDING
-                          </span>
-                        )}
-                        {item.status === 'APPROVED' && (
-                          <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            APPROVED
-                          </span>
-                        )}
-                        {item.status === 'REJECTED' && (
-                          <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-red-500/10 text-red-400 border border-red-500/20">
-                            REJECTED
-                          </span>
-                        )}
+                        <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                          {item.status}
+                        </span>
                       </td>
                       <td className="py-4 px-4 text-right">
-                        {item.status === 'PENDING' ? (
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              onClick={() => handleAction(item.id, 'APPROVED')}
-                              className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 font-bold text-[11px] flex items-center gap-1 transition-all"
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleAction(item.id, 'REJECTED')}
-                              className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 font-bold text-[11px] flex items-center gap-1 transition-all"
-                            >
-                              <XCircle className="w-3.5 h-3.5" />
-                              Reject
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-slate-500 font-normal">Processed</span>
-                        )}
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            disabled={processingId === item.id}
+                            onClick={() => handleAction(item.id, 'COMPLETED')}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 font-bold text-[11px] flex items-center gap-1 transition-all disabled:opacity-50"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            {processingId === item.id ? 'Processing...' : 'Approve'}
+                          </button>
+                          <button
+                            disabled={processingId === item.id}
+                            onClick={() => handleAction(item.id, 'REJECTED')}
+                            className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 font-bold text-[11px] flex items-center gap-1 transition-all disabled:opacity-50"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            Reject
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -273,6 +414,7 @@ export default function AdminDashboardPage() {
                 type="text"
                 value={trc20Wallet}
                 onChange={(e) => setTrc20Wallet(e.target.value)}
+                placeholder="Enter TRC20 address"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 font-mono text-xs text-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-500"
               />
             </div>
@@ -285,6 +427,7 @@ export default function AdminDashboardPage() {
                 type="text"
                 value={erc20Wallet}
                 onChange={(e) => setErc20Wallet(e.target.value)}
+                placeholder="Enter ERC20 address"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 font-mono text-xs text-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-500"
               />
             </div>
@@ -297,6 +440,7 @@ export default function AdminDashboardPage() {
                 type="text"
                 value={bep20Wallet}
                 onChange={(e) => setBep20Wallet(e.target.value)}
+                placeholder="Enter BEP20 address"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 font-mono text-xs text-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-500"
               />
             </div>
@@ -304,9 +448,10 @@ export default function AdminDashboardPage() {
             <div className="pt-2 flex items-center gap-4">
               <button
                 type="submit"
-                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 font-bold text-xs text-white shadow-lg transition-all"
+                disabled={savingWallets}
+                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 font-bold text-xs text-white shadow-lg transition-all disabled:opacity-50"
               >
-                Save Receiving Wallets
+                {savingWallets ? 'Saving...' : 'Save Receiving Wallets'}
               </button>
               {walletSaved && (
                 <span className="text-xs font-bold text-emerald-400 flex items-center gap-1">

@@ -1,65 +1,166 @@
-// ==========================================
-// API ROUTE: ADMIN DEPOSIT MANAGEMENT (/api/admin/deposits)
-// ==========================================
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { verifyToken } from "@/lib/auth";
+import { Role, TransactionStatus } from "@prisma/client";
 
-import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-
-export async function GET(req: Request) {
+export async function POST(request: Request) {
   try {
-    // In production, enforce Admin authentication session role checks here
-    const pendingDeposits = [
-      {
-        id: 'dep_101',
-        userEmail: 'alex.trader@gmail.com',
-        amount: 5000.00,
-        network: 'TRC20',
-        txHash: '0x8f7c9123a4b56c7890d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a3',
-        purpose: 'BOT_ACCESS_FEE',
-        tier: 'APEX_TRADER',
-        status: 'PENDING',
-        createdAt: '2026-07-27T14:30:00.000Z',
-      },
-      {
-        id: 'dep_102',
-        userEmail: 'sara.invest@yahoo.com',
-        amount: 10000.00,
-        network: 'BEP20',
-        txHash: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2',
-        purpose: 'BOT_ACCESS_FEE',
-        tier: 'QUANTUM_ALPHA',
-        status: 'PENDING',
-        createdAt: '2026-07-27T15:10:00.000Z',
-      }
-    ];
+    // 1. Verify JWT & Admin Role
+    const authHeader = request.headers.get("authorization");
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.substring(7)
+      : authHeader?.split(" ")[1];
 
-    return NextResponse.json({ deposits: pendingDeposits });
-  } catch (error) {
-    console.error('Admin Deposit Fetch Error:', error);
-    return NextResponse.json(
-      { error: 'Failed to retrieve pending deposit transactions.' },
-      { status: 500 }
-    );
-  }
-}
-
-export async function POST(req: Request) {
-  try {
-    const { depositId, action } = await req.json(); // action: 'APPROVE' | 'REJECT'
-
-    if (!depositId || !['APPROVE', 'REJECT'].includes(action)) {
-      return NextResponse.json({ error: 'Invalid payload attributes.' }, { status: 400 });
+    if (!token) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized: Missing token" },
+        { status: 401 }
+      );
     }
 
-    // In production: Execute Prisma transaction to update deposit status & credit user account balance/bot tier
+    const payload = verifyToken(token);
+    if (!payload?.userId) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized: Invalid token" },
+        { status: 401 }
+      );
+    }
+
+    // Verify Admin Role in DB
+    const adminUser = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { id: true, role: true },
+    });
+
+    if (
+      !adminUser ||
+      (adminUser.role !== Role.SUPER_ADMIN && adminUser.role !== Role.SUPPORT_ADMIN)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Forbidden: Admin privileges required" },
+        { status: 403 }
+      );
+    }
+
+    // 2. Parse Request Body
+    const body = await request.json();
+    const { transactionId, status, receivedAmountUsdt, notes } = body;
+
+    if (!transactionId || typeof transactionId !== "string") {
+      return NextResponse.json(
+        { success: false, error: "transactionId is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!status || !["COMPLETED", "REJECTED"].includes(status)) {
+      return NextResponse.json(
+        { success: false, error: "Status must be either COMPLETED or REJECTED" },
+        { status: 400 }
+      );
+    }
+
+    // 3. Find target transaction
+    const targetTx = await prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+
+    if (!targetTx) {
+      return NextResponse.json(
+        { success: false, error: "Transaction not found" },
+        { status: 404 }
+      );
+    }
+
+    if (targetTx.status !== TransactionStatus.PENDING) {
+      return NextResponse.json(
+        { success: false, error: `Transaction is already ${targetTx.status}` },
+        { status: 400 }
+      );
+    }
+
+    const finalReceivedAmount =
+      receivedAmountUsdt !== undefined
+        ? Number(receivedAmountUsdt)
+        : targetTx.expectedAmountUsdt;
+
+    // 4. Atomic Execution via Prisma Transaction
+    const result = await prisma.$transaction(async (tx) => {
+      // A. Update Transaction Record
+      const updatedTx = await tx.transaction.update({
+        where: { id: transactionId },
+        data: {
+          status: status as TransactionStatus,
+          receivedAmountUsdt: finalReceivedAmount,
+          notes: notes || `Verified by admin ${adminUser.id}`,
+        },
+      });
+
+      // B. Handle BOT_ACCESS_FEE Approval
+      if (status === "COMPLETED" && targetTx.type === "BOT_ACCESS_FEE") {
+        const pendingSub = await tx.botSubscription.findFirst({
+          where: { userId: targetTx.userId, status: "PENDING_PAYMENT" },
+          orderBy: { createdAt: "desc" },
+        });
+
+        if (pendingSub) {
+          await tx.botSubscription.update({
+            where: { id: pendingSub.id },
+            data: {
+              status: "ACTIVE",
+              amountPaidUsdt: finalReceivedAmount,
+              unlockedAt: new Date(),
+            },
+          });
+        }
+      }
+
+      // C. Handle INVESTMENT_DEPOSIT Approval
+      if (status === "COMPLETED" && targetTx.investmentPlanId) {
+        const now = new Date();
+        const lockupEnd = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+
+        await tx.investmentPlan.update({
+          where: { id: targetTx.investmentPlanId },
+          data: {
+            status: "ACTIVE",
+            lockupStartDate: now,
+            lockupEndDate: lockupEnd,
+            isLocked: true,
+          },
+        });
+      }
+
+      // D. Create Immutable Admin Audit Log
+      await tx.adminAuditLog.create({
+        data: {
+          adminId: adminUser.id,
+          targetUserId: targetTx.userId,
+          actionType: "DEPOSIT_VERIFICATION",
+          changesMade: JSON.stringify({
+            transactionId,
+            previousStatus: targetTx.status,
+            newStatus: status,
+            expectedAmount: targetTx.expectedAmountUsdt,
+            receivedAmount: finalReceivedAmount,
+          }),
+        },
+      });
+
+      return updatedTx;
+    });
+
     return NextResponse.json({
       success: true,
-      message: `Deposit ${depositId} successfully updated to status: ${action}D.`
+      data: {
+        message: `Deposit transaction ${status.toLowerCase()} successfully.`,
+        transaction: result,
+      },
     });
   } catch (error) {
-    console.error('Admin Deposit Update Error:', error);
+    console.error("Deposit Verification Error:", error);
     return NextResponse.json(
-      { error: 'Failed to update deposit verification status.' },
+      { success: false, error: "Internal Server Error" },
       { status: 500 }
     );
   }
